@@ -1,0 +1,5 @@
+configuration/
+grafana/
+data/
+
+**/config.yml

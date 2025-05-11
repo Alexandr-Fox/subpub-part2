@@ -2,11 +2,11 @@ server:
   grpc:
     host: "0.0.0.0"
     port: 50051
-    max_connection_age: "30s"
+    max_connection_age: "30000s"
     max_connection_age_grace: "5s"
 
   shutdown_timeout: "15s"
 
 logging:
   host: "0.0.0.0"
-  port: "9091"
+  port: 9091

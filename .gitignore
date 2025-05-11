@@ -3,3 +3,7 @@
 data/
 configuration/
 grafana/
+publisher
+subscriber
+publisher.exe
+subscriber.exe

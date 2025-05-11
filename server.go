@@ -162,6 +162,8 @@ func (s *pubSubServer) Publish(ctx context.Context, req *pb.PublishRequest) (*em
 
 	if err := s.bus.Publish(topic, data); err != nil {
 		deliveryErrorsCounter.WithLabelValues(topic).Inc()
+		log.Printf("Error publishing message to topic %s: %s", topic, data)
+
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 

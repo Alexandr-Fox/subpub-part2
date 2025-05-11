@@ -32,3 +32,10 @@ services:
     restart: unless-stopped
     environment:
       TZ: "Europe/Moscow"
+
+  grpc:
+    build:
+      dockerfile: Dockerfile
+    ports:
+      - "9091:9091"
+      - "50051:50051"
