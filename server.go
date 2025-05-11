@@ -3,24 +3,73 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/fsnotify/fsnotify"
-	"github.com/spf13/viper"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"subpubrpc/config"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/Alexandr-Fox/subpub"
+	"github.com/fsnotify/fsnotify"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/spf13/viper"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	pb "subpubrpc/proto"
+)
+
+// Метрики Prometheus
+var (
+	subscribersGauge = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "pubsub_active_subscribers",
+			Help: "Number of currently active subscribers",
+		},
+		[]string{"topic"},
+	)
+
+	messagesPublishedCounter = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "pubsub_messages_published_total",
+			Help: "Total number of published messages",
+		},
+		[]string{"topic"},
+	)
+
+	messagesDeliveredCounter = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "pubsub_messages_delivered_total",
+			Help: "Total number of successfully delivered messages",
+		},
+		[]string{"topic"},
+	)
+
+	deliveryErrorsCounter = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "pubsub_message_errors_total",
+			Help: "Total number of message delivery errors",
+		},
+		[]string{"topic"},
+	)
+
+	deliveryLatencyHistogram = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "pubsub_message_delivery_latency_seconds",
+			Help:    "Message delivery latency distribution",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"topic"},
+	)
 )
 
 type pubSubServer struct {
@@ -40,45 +89,60 @@ func NewPubSubServer() *pubSubServer {
 }
 
 func (s *pubSubServer) Subscribe(req *pb.SubscribeRequest, stream pb.PubSub_SubscribeServer) error {
-	key := req.GetKey()
-	if key == "" {
-		return status.Error(codes.InvalidArgument, "key cannot be empty")
+	topic := req.GetKey()
+	if topic == "" {
+		return status.Error(codes.InvalidArgument, "topic cannot be empty")
 	}
 
-	// Регистрируем клиента
+	// Регистрируем подписчика
 	s.mu.Lock()
-	if _, ok := s.clients[key]; !ok {
-		s.clients[key] = make(map[pb.PubSub_SubscribeServer]struct{})
+	if _, ok := s.clients[topic]; !ok {
+		s.clients[topic] = make(map[pb.PubSub_SubscribeServer]struct{})
 	}
-	s.clients[key][stream] = struct{}{}
+	s.clients[topic][stream] = struct{}{}
+	subscribersGauge.WithLabelValues(topic).Inc()
 	s.mu.Unlock()
 
 	// Создаем подписку
-	sub, err := s.bus.Subscribe(key, func(msg interface{}) {
+	sub, err := s.bus.Subscribe(topic, func(msg interface{}) {
+		start := time.Now()
 		data, ok := msg.(string)
 		if !ok {
+			deliveryErrorsCounter.WithLabelValues(topic).Inc()
 			return
 		}
+
 		if err := stream.Send(&pb.Event{Data: data}); err != nil {
-			log.Printf("Failed to send event: %v", err)
+			deliveryErrorsCounter.WithLabelValues(topic).Inc()
+			log.Printf("Failed to deliver message to topic %s: %v", topic, err)
+			return
 		}
+
+		messagesDeliveredCounter.WithLabelValues(topic).Inc()
+		deliveryLatencyHistogram.WithLabelValues(topic).Observe(time.Since(start).Seconds())
 	})
 	if err != nil {
+		subscribersGauge.WithLabelValues(topic).Dec()
 		return status.Error(codes.Internal, err.Error())
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		sub.Unsubscribe()
+		subscribersGauge.WithLabelValues(topic).Dec()
+	}()
 
-	// Ждем завершения контекста клиента или shutdown сервера
+	// Ожидаем завершения
 	select {
 	case <-stream.Context().Done():
+		log.Printf("Client disconnected from topic %s", topic)
 	case <-s.shutdown:
+		log.Printf("Server shutdown, unsubscribing from topic %s", topic)
 	}
 
-	// Удаляем клиента при отключении
+	// Удаляем подписчика
 	s.mu.Lock()
-	delete(s.clients[key], stream)
-	if len(s.clients[key]) == 0 {
-		delete(s.clients, key)
+	delete(s.clients[topic], stream)
+	if len(s.clients[topic]) == 0 {
+		delete(s.clients, topic)
 	}
 	s.mu.Unlock()
 
@@ -86,14 +150,18 @@ func (s *pubSubServer) Subscribe(req *pb.SubscribeRequest, stream pb.PubSub_Subs
 }
 
 func (s *pubSubServer) Publish(ctx context.Context, req *pb.PublishRequest) (*emptypb.Empty, error) {
-	key := req.GetKey()
+	topic := req.GetKey()
 	data := req.GetData()
 
-	if key == "" {
-		return nil, status.Error(codes.InvalidArgument, "key cannot be empty")
+	if topic == "" {
+		return nil, status.Error(codes.InvalidArgument, "topic cannot be empty")
 	}
 
-	if err := s.bus.Publish(key, data); err != nil {
+	messagesPublishedCounter.WithLabelValues(topic).Inc()
+	log.Printf("Publishing message to topic %s: %s", topic, data)
+
+	if err := s.bus.Publish(topic, data); err != nil {
+		deliveryErrorsCounter.WithLabelValues(topic).Inc()
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
@@ -103,6 +171,25 @@ func (s *pubSubServer) Publish(ctx context.Context, req *pb.PublishRequest) (*em
 func (s *pubSubServer) Shutdown(ctx context.Context) error {
 	close(s.shutdown)
 	return s.bus.Close(ctx)
+}
+
+func startMetricsServer(addr string) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	go func() {
+		log.Printf("Starting metrics server on %s", addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Metrics server error: %v", err)
+		}
+	}()
+
+	return srv
 }
 
 func loadConfig(path string) (*config.Config, error) {
@@ -131,23 +218,19 @@ func loadConfig(path string) (*config.Config, error) {
 	return &cfg, nil
 }
 
-func setupLogger(cfg *config.LoggingConfig) {
-	// Здесь можно настроить логгер в соответствии с конфигурацией
-	// Например, для zap или logrus
-	log.Printf("Logger configured with level=%s and format=%s", cfg.Level, cfg.Format)
-}
-
 func main() {
-	// Загрузка конфигурации
 	cfg, err := loadConfig("config/config.yml")
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Настройка логгера
-	setupLogger(&cfg.Logging)
+	metricsServer := startMetricsServer(cfg.Logging.ConnectionString())
 
-	// Создаем gRPC сервер с параметрами из конфига
+	lis, err := net.Listen("tcp", cfg.Server.GRPC.ConnectionString())
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+
 	server := grpc.NewServer(
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionAge:      cfg.Server.GRPC.MaxConnectionAge,
@@ -158,22 +241,17 @@ func main() {
 	pubSubServer := NewPubSubServer()
 	pb.RegisterPubSubServer(server, pubSubServer)
 
-	lis, err := net.Listen("tcp",
-		fmt.Sprintf("%s:%d", cfg.Server.GRPC.Host, cfg.Server.GRPC.Port))
-	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
-	}
+	// Graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Starting gRPC server on %s:%d", cfg.Server.GRPC.Host, cfg.Server.GRPC.Port)
+		log.Printf("Starting gRPC server on %s", lis.Addr())
 		if err := server.Serve(lis); err != nil && err != grpc.ErrServerStopped {
 			log.Fatalf("gRPC server error: %v", err)
 		}
 	}()
 
-	// Graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Println("Shutting down server...")
@@ -193,11 +271,15 @@ func main() {
 		log.Printf("PubSub server shutdown error: %v", err)
 	}
 
+	if err := metricsServer.Shutdown(ctx); err != nil {
+		log.Printf("Metrics server shutdown error: %v", err)
+	}
+
 	select {
 	case <-stopped:
-		log.Println("Server stopped gracefully")
+		log.Println("Servers stopped gracefully")
 	case <-ctx.Done():
 		server.Stop()
-		log.Println("Server stopped by timeout")
+		log.Println("Servers stopped by timeout")
 	}
 }
