@@ -5,6 +5,9 @@ go 1.24
 require (
 	github.com/Alexandr-Fox/subpub v0.0.0-20250510130703-8ff38e26d7ec
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/getsentry/sentry-go v0.32.0
+	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
+	github.com/johnbellone/grpc-middleware-sentry v0.4.0
 	github.com/prometheus/client_golang v1.22.0
 	github.com/spf13/viper v1.20.1
 	google.golang.org/grpc v1.72.0

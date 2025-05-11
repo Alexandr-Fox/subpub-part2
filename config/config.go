@@ -7,6 +7,7 @@ import (
 
 type Config struct {
 	Server  ServerConfig     `mapstructure:"server"`
+	Sentry  SentryConfig     `mapstructure:"sentry"`
 	Logging PrometheusConfig `mapstructure:"logging"`
 }
 
@@ -25,6 +26,11 @@ type GRPCConfig struct {
 type PrometheusConfig struct {
 	Host string `mapstructure:"host"`
 	Port int    `mapstructure:"port"`
+}
+
+type SentryConfig struct {
+	DSN         string `mapstructure:"dsn"`
+	Environment string `mapstructure:"environment"`
 }
 
 func (cfg *GRPCConfig) ConnectionString() string {
