@@ -16,11 +16,15 @@ import (
 	pb "subpubrpc/proto"
 )
 
+const (
+	gRPC_ADDRESS = "localhost:50051"
+	gRPC_KEY     = "test"
+)
+
 func main() {
 	// Настройка соединения с сервером
-	conn, err := grpc.Dial("localhost:50051",
+	conn, err := grpc.NewClient(gRPC_ADDRESS,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
@@ -41,13 +45,13 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		subscribeToEvents(ctx, client, "test")
+		subscribeToEvents(ctx, client, gRPC_KEY)
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		publishMessages(ctx, client, "test")
+		publishMessages(ctx, client, gRPC_KEY)
 	}()
 
 	<-sigChan

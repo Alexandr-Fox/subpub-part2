@@ -2,14 +2,18 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"github.com/fsnotify/fsnotify"
+	"github.com/spf13/viper"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"subpubrpc/config"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/Alexandr-Fox/subpub"
 	"google.golang.org/grpc"
@@ -101,49 +105,94 @@ func (s *pubSubServer) Shutdown(ctx context.Context) error {
 	return s.bus.Close(ctx)
 }
 
+func loadConfig(path string) (*config.Config, error) {
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetConfigType("yaml")
+
+	if err := v.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("failed to read config: %w", err)
+	}
+
+	var cfg config.Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	// Настройка автоматического обновления конфига
+	v.WatchConfig()
+	v.OnConfigChange(func(e fsnotify.Event) {
+		log.Println("Config file changed:", e.Name)
+		if err := v.Unmarshal(&cfg); err != nil {
+			log.Printf("Error reloading config: %v", err)
+		}
+	})
+
+	return &cfg, nil
+}
+
+func setupLogger(cfg *config.LoggingConfig) {
+	// Здесь можно настроить логгер в соответствии с конфигурацией
+	// Например, для zap или logrus
+	log.Printf("Logger configured with level=%s and format=%s", cfg.Level, cfg.Format)
+}
+
 func main() {
-	// Создаем gRPC сервер
-	lis, err := net.Listen("tcp", ":50051")
+	// Загрузка конфигурации
+	cfg, err := loadConfig("config/config.yml")
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Настройка логгера
+	setupLogger(&cfg.Logging)
+
+	// Создаем gRPC сервер с параметрами из конфига
+	server := grpc.NewServer(
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionAge:      cfg.Server.GRPC.MaxConnectionAge,
+			MaxConnectionAgeGrace: cfg.Server.GRPC.MaxConnectionAgeGrace,
+		}),
+	)
+
+	pubSubServer := NewPubSubServer()
+	pb.RegisterPubSubServer(server, pubSubServer)
+
+	lis, err := net.Listen("tcp",
+		fmt.Sprintf("%s:%d", cfg.Server.GRPC.Host, cfg.Server.GRPC.Port))
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
 
-	server := grpc.NewServer()
-	pubSubServer := NewPubSubServer()
-	pb.RegisterPubSubServer(server, pubSubServer)
-
-	// Graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
 	go func() {
-		log.Printf("Starting gRPC server on %s", lis.Addr())
+		log.Printf("Starting gRPC server on %s:%d", cfg.Server.GRPC.Host, cfg.Server.GRPC.Port)
 		if err := server.Serve(lis); err != nil && err != grpc.ErrServerStopped {
 			log.Fatalf("gRPC server error: %v", err)
 		}
 	}()
 
-	// Ожидаем сигнал завершения
+	// Graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("Shutting down server...")
 
-	// Останавливаем gRPC сервер
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	log.Println("Shutting down server...")
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		cfg.Server.ShutdownTimeout,
+	)
 	defer cancel()
 
-	// Сначала GracefulStop для gRPC сервера
 	stopped := make(chan struct{})
 	go func() {
 		server.GracefulStop()
 		close(stopped)
 	}()
 
-	// Затем shutdown для сервиса подписок
 	if err := pubSubServer.Shutdown(ctx); err != nil {
 		log.Printf("PubSub server shutdown error: %v", err)
 	}
 
-	// Ожидаем завершения или таймаута
 	select {
 	case <-stopped:
 		log.Println("Server stopped gracefully")
