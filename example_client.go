@@ -2,7 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -12,7 +17,11 @@ import (
 )
 
 func main() {
-	conn, err := grpc.NewClient("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Настройка соединения с сервером
+	conn, err := grpc.Dial("localhost:50051",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	)
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
 	}
@@ -20,32 +29,100 @@ func main() {
 
 	client := pb.NewPubSubClient(conn)
 
-	// Подписка
-	go func() {
-		stream, err := client.Subscribe(context.Background(), &pb.SubscribeRequest{Key: "test1"})
-		if err != nil {
-			log.Fatalf("could not subscribe: %v", err)
-		}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-		for {
-			event, err := stream.Recv()
-			if err != nil {
-				log.Printf("subscription error: %v", err)
-				return
-			}
-			log.Printf("Received event: %s", event.GetData())
-		}
+	var wg sync.WaitGroup
+
+	// Обработка сигналов для graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		subscribeToEvents(ctx, client, "test")
 	}()
 
-	// Публикация
-	for i := 0; i < 5; i++ {
-		_, err := client.Publish(context.Background(), &pb.PublishRequest{
-			Key:  "test",
-			Data: "Hello World!",
-		})
-		if err != nil {
-			log.Fatalf("could not publish: %v", err)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		publishMessages(ctx, client, "test")
+	}()
+
+	<-sigChan
+	log.Println("Received shutdown signal, initiating graceful shutdown...")
+
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Println("All operations completed successfully")
+	case <-time.After(5 * time.Second):
+		log.Println("Graceful shutdown timed out")
+	}
+}
+
+func subscribeToEvents(ctx context.Context, client pb.PubSubClient, key string) {
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Stopping subscription...")
+			return
+		default:
+			stream, err := client.Subscribe(ctx, &pb.SubscribeRequest{Key: key})
+			if err != nil {
+				log.Printf("Subscription error: %v, retrying...", err)
+				time.Sleep(1 * time.Second)
+
+				continue
+			}
+
+			log.Printf("Subscribed to key: %s", key)
+			for {
+				event, err := stream.Recv()
+				if err != nil {
+					log.Printf("Stream receive error: %v", err)
+					break
+				}
+
+				log.Printf("Received event: %s", event.GetData())
+			}
 		}
-		time.Sleep(1 * time.Second)
+	}
+}
+
+func publishMessages(ctx context.Context, client pb.PubSubClient, key string) {
+	count := 0
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Stopping message publisher...")
+			return
+		case <-ticker.C:
+			count++
+
+			msg := &pb.PublishRequest{
+				Key:  key,
+				Data: fmt.Sprintf("Message %d", count),
+			}
+
+			_, err := client.Publish(ctx, msg)
+			if err != nil {
+				log.Printf("Publish error: %v", err)
+				continue
+			}
+
+			log.Printf("Published message: %s", msg.Data)
+		}
 	}
 }
