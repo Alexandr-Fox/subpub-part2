@@ -72,22 +72,31 @@ docker-compose up --build
 ```yaml
 server:
   grpc:
-    host: "0.0.0.0"    # Хост для gRPC сервера
-    port: 50051        # Порт для gRPC сервера
-    max_connection_age: "30s"  # Макс. время жизни соединения
+    host: "0.0.0.0"                # Хост для gRPC сервера
+    port: 50051                    # Порт для gRPC сервера
+    max_connection_age: "30s"      # Макс. время жизни соединения
     max_connection_age_grace: "5s" # Время на завершение операций
   
-  shutdown_timeout: "15s"  # Таймаут для graceful shutdown
+  shutdown_timeout: "15s" # Таймаут для graceful shutdown
+
+sentry:
+   dsn: "your_sentry_dsn"     # DSN строка sentry
+   environment: "production"  # Тип среды "production" или "development" для фильтрации событий в sentry
+   debug: true                # Включить режим отладки в sentry
+   release: "subpub-grpc@1.0" # Название релиза для фильтрации в sentry
+   send_default_pii: true     # Отправлять пользовательскую информацию по умолчанию в sentry
 
 logging:
-  host: "0.0.0.0"      # Хост для prometheus сервера
-  port: 9091           # Порт для prometheus сервера
+  host: "0.0.0.0" # Хост для prometheus сервера
+  port: 9091      # Порт для prometheus сервера
 ```
 
 ## Логирование и мониторинг
 
 ### Логирование
-Сервер поддерживает логирование, которое выводит базовую информацию об ошибках и опубликованных сообщениях в консоль в текстовом виде. 
+
+- Сервер поддерживает логирование, которое выводит базовую информацию об ошибках и опубликованных сообщениях в консоль в текстовом виде.
+- Для отладки ошибок используется логирование запросов через sentry
 
 ### Метрики Prometheus
 Сервис предоставляет метрики по адресу `http://localhost:9091/metrics`:

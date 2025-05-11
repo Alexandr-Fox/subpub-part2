@@ -10,6 +10,9 @@ server:
 sentry:
   dsn: "your_sentry_dsn"
   environment: "production"  # или "development"
+  debug: true
+  release: "subpub-grpc@1.0"
+  send_default_pii: true
 
 logging:
   host: "0.0.0.0"

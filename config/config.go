@@ -29,8 +29,11 @@ type PrometheusConfig struct {
 }
 
 type SentryConfig struct {
-	DSN         string `mapstructure:"dsn"`
-	Environment string `mapstructure:"environment"`
+	DSN            string `mapstructure:"dsn"`
+	Environment    string `mapstructure:"environment"`
+	Debug          bool   `mapstructure:"debug"`
+	Release        string `mapstructure:"release"`
+	SendDefaultPII bool   `mapstructure:"send_default_pii"`
 }
 
 func (cfg *GRPCConfig) ConnectionString() string {

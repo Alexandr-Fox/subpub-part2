@@ -33,12 +33,17 @@ import (
 )
 
 // Инициализация Sentry
-func initSentry(dsn string, env string) error {
+func initSentry(dsn string, env string, debug bool, release string, sendDefaultPii bool) error {
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              dsn,
 		Environment:      env,
 		TracesSampleRate: 1.0,
 		AttachStacktrace: true,
+		Debug:            debug,
+		Release:          release,
+		SendDefaultPII:   sendDefaultPii,
+		EnableTracing:    true,
+		SampleRate:       1.0,
 	})
 	if err != nil {
 		return fmt.Errorf("sentry.Init: %w", err)
@@ -254,7 +259,7 @@ func main() {
 	}
 
 	// Инициализация Sentry
-	if err := initSentry(cfg.Sentry.DSN, cfg.Sentry.Environment); err != nil {
+	if err := initSentry(cfg.Sentry.DSN, cfg.Sentry.Environment, cfg.Sentry.Debug, cfg.Sentry.Release, cfg.Sentry.SendDefaultPII); err != nil {
 		log.Fatalf("Failed to initialize Sentry: %v", err)
 	}
 	defer sentry.Flush(2 * time.Second)
